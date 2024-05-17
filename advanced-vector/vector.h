@@ -146,17 +146,13 @@ public:
             else {
                 /* Скопировать элементы из rhs, создав при необходимости новые или удалив существующие */
                 //size_t count = std::abs(rhs.size_ - size_);
-                size_t count = (rhs.size_ < size_) ? size_ - rhs.size_ : rhs.size_ - size_;
+                size_t count = (rhs.size_ < size_) ? size_ - rhs.size_ : rhs.size_ - size_;                
                 if (rhs.size_ < size_) {
-                    for (size_t i = 0; i < rhs.size_; ++i) {
-                        data_[i] = rhs.data_[i];
-                    }
+					std::copy_n(rhs.data_.GetAddress(), rhs.size_, begin());
                     std::destroy_n(data_.GetAddress() + rhs.size_, count);
                 }
-                else {                    
-                    for (size_t i = 0; i < size_; ++i) {
-                        data_[i] = rhs.data_[i];
-                    }
+                else {
+                    std::copy_n(rhs.data_.GetAddress(), size_, begin());
                     std::uninitialized_copy_n(rhs.data_.GetAddress() + size_, count, data_.GetAddress() + size_);
                 }
                 size_ = rhs.size_;
@@ -220,19 +216,8 @@ public:
 
     template <typename... Args>
     T& EmplaceBack(Args&&... args) {
-        if (size_ == Capacity()) {
-            RawMemory<T> new_data(size_ == 0 ? 1 : size_ * 2);
-            new (new_data + size_) T(std::forward<Args>(args)...);            
-            UninitializedNewData(new_data);
-            std::destroy_n(data_.GetAddress(), size_);
-            data_.Swap(new_data);
-        }
-        else
-        {
-            new (data_ + size_) T(std::forward<Args>(args)...);
-        }
-        ++size_;
-        return *(data_.GetAddress() + size_ - 1);
+        
+        return *Emplace(end(), std::forward<Args>(args)...);
     }
 
     iterator Insert(const_iterator pos, const T& value) {
@@ -249,56 +234,11 @@ public:
         size_t pos_idx = std::distance(cbegin(), pos);
 
         if (size_ == Capacity()) {
-            size_t count_prev = std::distance(cbegin(), pos);
-            size_t count_next = std::distance(pos, cend());
-
-            RawMemory<T> new_data((size_ == 0) ? 1 : 2 * size_);           
-			new (new_data.GetAddress() + pos_idx) T(std::forward<Args>(args)...);
-			if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) {
-				try {
-					std::uninitialized_move_n(begin(), count_prev, new_data.GetAddress());
-				}
-				catch (...) {
-					std::destroy_n(begin(), count_prev);
-				}
-				try {
-					std::uninitialized_move_n(begin() + count_prev, count_next, new_data.GetAddress() + count_prev + 1);
-				}
-				catch (...) {
-					std::destroy_n(begin() + count_prev, count_next);
-				}
-			}
-			else 
-            {
-				try {
-					std::uninitialized_copy_n(begin(), count_prev, new_data.GetAddress());
-				}
-				catch (...) {
-					std::destroy_n(begin(), count_prev);
-				}
-				try {
-					std::uninitialized_copy_n(begin() + count_prev, count_next, new_data.GetAddress() + count_prev + 1);
-				}
-				catch (...) {
-					std::destroy_n(begin() + count_prev, count_next);
-				}
-
-			}
-            std::destroy_n(begin(), size_);
-            data_.Swap(new_data);
+            InsertWithAlloc(pos, pos_idx, std::forward<Args>(args)...);
         }
         else 
         {   //size < capacity
-            if (size_ == pos_idx) {
-                new (begin() + pos_idx) T(std::forward<Args>(args)...);
-            }
-            else 
-            {
-                auto tmp = T(std::forward<Args>(args)...);
-				new (end()) T(std::forward<T>(*(end() - 1)));
-				std::move_backward(begin() + pos_idx, end() - 1, end());
-				data_[pos_idx] = std::move(tmp);
-            }
+            InsertWithoutAlloc(pos_idx, std::forward<Args>(args)...);
         }
 
         ++size_;
@@ -363,6 +303,61 @@ private:
         else {
             std::uninitialized_copy_n(data_.GetAddress(), size_, new_data.GetAddress());
         }
+    }
+
+    template <typename... Args>
+    void InsertWithoutAlloc(size_t pos_idx, Args&&... args) {
+        if (size_ == pos_idx) {
+            new (begin() + pos_idx) T(std::forward<Args>(args)...);
+        }
+        else
+        {
+            auto tmp = T(std::forward<Args>(args)...);
+            new (end()) T(std::forward<T>(*(end() - 1)));
+            std::move_backward(begin() + pos_idx, end() - 1, end());
+            data_[pos_idx] = std::move(tmp);
+        }
+    }
+
+    template <typename... Args>
+    void InsertWithAlloc(const_iterator pos, size_t pos_idx, Args&&... args) {
+        size_t count_prev = std::distance(cbegin(), pos);
+        size_t count_next = std::distance(pos, cend());
+
+        RawMemory<T> new_data((size_ == 0) ? 1 : 2 * size_);
+        new (new_data.GetAddress() + pos_idx) T(std::forward<Args>(args)...);
+        if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) {
+            try {
+                std::uninitialized_move_n(begin(), count_prev, new_data.GetAddress());
+            }
+            catch (...) {
+                std::destroy_n(begin(), count_prev);
+            }
+            try {
+                std::uninitialized_move_n(begin() + count_prev, count_next, new_data.GetAddress() + count_prev + 1);
+            }
+            catch (...) {
+                std::destroy_n(begin() + count_prev, count_next);
+            }
+        }
+        else
+        {
+            try {
+                std::uninitialized_copy_n(begin(), count_prev, new_data.GetAddress());
+            }
+            catch (...) {
+                std::destroy_n(begin(), count_prev);
+            }
+            try {
+                std::uninitialized_copy_n(begin() + count_prev, count_next, new_data.GetAddress() + count_prev + 1);
+            }
+            catch (...) {
+                std::destroy_n(begin() + count_prev, count_next);
+            }
+
+        }
+        std::destroy_n(begin(), size_);
+        data_.Swap(new_data);
     }
 
     RawMemory<T> data_;
